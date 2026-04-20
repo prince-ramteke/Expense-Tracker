@@ -18,7 +18,9 @@ public class JwtService {
 
 
 
-    private final SecretKey SECRET_KEY = Keys.secretKeyFor(io.jsonwebtoken.SignatureAlgorithm.HS256);
+    private final SecretKey SECRET_KEY = Keys.hmacShaKeyFor(
+            "mysecretkeymysecretkeymysecretkey12345".getBytes()
+    );
 
     public String generateToken(String email) {
         return Jwts.builder()

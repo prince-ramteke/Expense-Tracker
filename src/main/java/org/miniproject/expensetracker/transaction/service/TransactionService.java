@@ -2,6 +2,7 @@
 
     import lombok.RequiredArgsConstructor;
     import org.miniproject.expensetracker.auth.entity.User;
+    import org.miniproject.expensetracker.exception.CustomException;
     import org.miniproject.expensetracker.transaction.dto.TransactionRequest;
     import org.miniproject.expensetracker.transaction.entity.PaymentMode;
     import org.miniproject.expensetracker.transaction.entity.Transaction;
@@ -25,7 +26,7 @@
         public Transaction addTransaction(User user, TransactionRequest request) {
 
             Category category = categoryRepository.findById(request.getCategoryId())
-                    .orElseThrow(() -> new RuntimeException("Category not found"));
+                    .orElseThrow(() -> new CustomException("Category not found"));
 
             // 🔐 SECURITY CHECK
             if (!category.getUser().getId().equals(user.getId())) {
@@ -74,6 +75,8 @@
             transaction.setTransactionDate(request.getTransactionDate());
             transaction.setPaymentMode(PaymentMode.valueOf(request.getPaymentMode()));
             transaction.setNote(request.getNote());
+
+            // OPTIONAL: attach EMI category later
 
             transactionRepository.save(transaction);
         }
