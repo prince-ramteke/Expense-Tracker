@@ -29,9 +29,8 @@ apiClient.interceptors.request.use((config) => {
 
   const isAuthRequest = config.url?.startsWith("/auth/");
 
-  if (!isAuthRequest) {
-    config.headers = config.headers ?? {};
-    config.headers.Authorization = `Bearer ${token}`;
+  if (!isAuthRequest && config.headers) {
+    config.headers.set("Authorization", `Bearer ${token}`);
   }
 
   return config;
