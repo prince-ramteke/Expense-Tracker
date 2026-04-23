@@ -12,9 +12,16 @@ import {
 
 import type { NumericValue, Transaction } from "@/types/api";
 
-const currencyFormatter = new Intl.NumberFormat("en-US", {
+const currencyFormatter = new Intl.NumberFormat("en-IN", {
   style: "currency",
-  currency: "USD",
+  currency: "INR",
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
+});
+
+const compactCurrencyFormatter = new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
   minimumFractionDigits: 0,
   maximumFractionDigits: 2,
 });
@@ -37,6 +44,9 @@ const getTransactionDate = (value?: string | null) => {
 
 export const formatCurrency = (value: NumericValue | null | undefined) =>
   currencyFormatter.format(getAmount(value));
+
+export const formatCompactCurrency = (value: NumericValue | null | undefined) =>
+  compactCurrencyFormatter.format(getAmount(value));
 
 export const formatDisplayDate = (
   value?: string | null,

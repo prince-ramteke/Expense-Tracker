@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -24,6 +25,7 @@ import {
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import TransactionDialog from "@/components/transactions/TransactionDialog";
 import apiClient from "@/api/apiClient";
 import { getApiErrorMessage } from "@/lib/api";
 import {
@@ -32,12 +34,13 @@ import {
   getCashFlowSeries,
   getExpenseByCategory,
 } from "@/lib/finance";
-import type { DashboardData, Transaction } from "@/types/api";
+import type { DashboardData, Transaction, TransactionType } from "@/types/api";
 
 const CHART_COLORS = ["#0f766e", "#16a34a", "#f59e0b", "#ef4444", "#8b5cf6"];
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const [transactionDialogType, setTransactionDialogType] = useState<TransactionType | null>(null);
 
   const {
     data: dashboardData,
@@ -150,28 +153,40 @@ export default function Dashboard() {
           <Button
             variant="outline"
             className="gap-2"
-            onClick={() =>
-              navigate("/transactions", {
-                state: { openNew: true, transactionType: "EXPENSE" },
-              })
-            }
+            onClick={() => setTransactionDialogType("EXPENSE")}
           >
             <ArrowDownRight className="w-4 h-4 text-rose-500" />
             Add Expense
           </Button>
           <Button
             className="gap-2"
-            onClick={() =>
-              navigate("/transactions", {
-                state: { openNew: true, transactionType: "INCOME" },
-              })
-            }
+            onClick={() => setTransactionDialogType("INCOME")}
           >
             <Plus className="w-4 h-4" />
             Add Income
           </Button>
         </div>
       </div>
+
+      <TransactionDialog
+        open={transactionDialogType !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setTransactionDialogType(null);
+          }
+        }}
+        defaultTransactionType={transactionDialogType || "EXPENSE"}
+        title={transactionDialogType === "INCOME" ? "Add Income" : "Add Expense"}
+        description={
+          transactionDialogType === "INCOME"
+            ? "Record an income entry from the dashboard, then continue in the transactions view."
+            : "Record an expense entry from the dashboard, then continue in the transactions view."
+        }
+        onSuccess={() => {
+          setTransactionDialogType(null);
+          navigate("/transactions");
+        }}
+      />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         {stats.map((stat, index) => {

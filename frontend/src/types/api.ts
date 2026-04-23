@@ -59,6 +59,8 @@ export interface Due {
   status: DueStatus;
   recurrence: RecurrenceType;
   note?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface Emi {
@@ -73,6 +75,8 @@ export interface Emi {
   paidInstallments: number;
   status: EmiStatus;
   note?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface EmiInstallment {

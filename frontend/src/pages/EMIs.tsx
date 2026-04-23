@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import { CalendarDays, AlertTriangle, ArrowRight, Loader2 } from "lucide-react";
@@ -30,7 +30,7 @@ import {
 import apiClient from "@/api/apiClient";
 import { getApiErrorMessage } from "@/lib/api";
 import { formatCurrency, formatDisplayDate } from "@/lib/finance";
-import type { Emi, EmiInstallment } from "@/types/api";
+import type { Category, Emi, EmiInstallment, Transaction } from "@/types/api";
 
 const emiSchema = z.object({
   loanName: z.string().trim().min(1, "Loan name is required"),
@@ -55,6 +55,7 @@ const emiSchema = z.object({
 
 type EMIForm = z.infer<typeof emiSchema>;
 type EMIFormValues = z.input<typeof emiSchema>;
+type InstallmentsByEmi = Record<number, EmiInstallment[]>;
 
 const defaultEmiValues: Partial<EMIFormValues> = {
   loanName: "",
@@ -65,6 +66,9 @@ const defaultEmiValues: Partial<EMIFormValues> = {
 };
 
 const CategoryIcon = () => <CalendarDays className="w-5 h-5 text-primary" />;
+
+const getEmiFallbackNote = (emi: Emi, installment: EmiInstallment) =>
+  `EMI installment #${installment.installmentNo} for ${emi.loanName}`;
 
 export default function EMIs() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -83,24 +87,36 @@ export default function EMIs() {
     },
   });
 
+  const emiIdsKey = useMemo(
+    () => emis.map((emi) => emi.id).sort((left, right) => left - right).join(","),
+    [emis],
+  );
+
+  const {
+    data: installmentsByEmi = {},
+    isLoading: isInstallmentsSnapshotLoading,
+  } = useQuery<InstallmentsByEmi>({
+    queryKey: ["emi-installments-all", emiIdsKey],
+    enabled: emis.length > 0,
+    queryFn: async () => {
+      const responses = await Promise.all(
+        emis.map(async (emi) => {
+          const response = await apiClient.get<EmiInstallment[]>(
+            `/emis/${emi.id}/installments`,
+          );
+          return [emi.id, response.data] as const;
+        }),
+      );
+
+      return Object.fromEntries(responses);
+    },
+  });
+
   const selectedEmi = selectedEmiId
     ? emis.find((emi) => emi.id === selectedEmiId) || null
     : null;
-
-  const {
-    data: installments = [],
-    isLoading: isInstallmentsLoading,
-    error: installmentsError,
-  } = useQuery<EmiInstallment[]>({
-    queryKey: ["emi-installments", selectedEmiId],
-    queryFn: async () => {
-      const response = await apiClient.get<EmiInstallment[]>(
-        `/emis/${selectedEmiId}/installments`,
-      );
-      return response.data;
-    },
-    enabled: selectedEmiId !== null,
-  });
+  const selectedInstallments =
+    selectedEmiId !== null ? installmentsByEmi[selectedEmiId] || [] : [];
 
   const {
     register,
@@ -124,6 +140,7 @@ export default function EMIs() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["emis"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["emi-installments-all"] });
       toast.success("EMI plan created successfully");
       setIsDialogOpen(false);
       reset(defaultEmiValues);
@@ -135,12 +152,83 @@ export default function EMIs() {
     },
   });
 
-  const payInstallmentMutation = useMutation({
-    mutationFn: async (emiId: number) => {
-      const installmentResponse = await apiClient.get<EmiInstallment[]>(
-        `/emis/${emiId}/installments`,
+  const ensureExpenseCategory = async () => {
+    const cachedCategories =
+      queryClient.getQueryData<Category[]>(["categories"]) || [];
+
+    const existingEmiCategory = cachedCategories.find(
+      (category) =>
+        category.name.trim().toLowerCase() === "emi payments" &&
+        (category.type === "EXPENSE" || category.type === "BOTH"),
+    );
+
+    if (existingEmiCategory) {
+      return existingEmiCategory.id;
+    }
+
+    try {
+      const createdCategory = await apiClient.post<Category>("/categories", {
+        name: "EMI Payments",
+        type: "EXPENSE",
+      });
+
+      queryClient.invalidateQueries({ queryKey: ["categories"] });
+      return createdCategory.data.id;
+    } catch {
+      const fallbackCategory = cachedCategories.find(
+        (category) => category.type === "EXPENSE" || category.type === "BOTH",
       );
-      const nextPendingInstallment = installmentResponse.data.find(
+
+      if (fallbackCategory) {
+        return fallbackCategory.id;
+      }
+
+      throw new Error("Create an expense category before recovering EMI payments.");
+    }
+  };
+
+  const ensureFallbackEmiTransaction = async (
+    emi: Emi,
+    installment: EmiInstallment,
+  ) => {
+    const note = getEmiFallbackNote(emi, installment);
+    const paidDate = installment.paidDate || new Date().toISOString().split("T")[0];
+
+    const transactionsResponse = await apiClient.get<Transaction[]>("/transactions");
+    const existingTransaction = transactionsResponse.data.find(
+      (transaction) =>
+        transaction.title === `EMI - ${emi.loanName}` &&
+        transaction.transactionDate === paidDate &&
+        String(transaction.amount) === String(installment.amount) &&
+        transaction.note === note,
+    );
+
+    if (existingTransaction) {
+      return;
+    }
+
+    const categoryId = await ensureExpenseCategory();
+
+    await apiClient.post("/transactions", {
+      title: `EMI - ${emi.loanName}`,
+      amount: Number(installment.amount),
+      transactionType: "EXPENSE",
+      transactionDate: paidDate,
+      paymentMode: "OTHER",
+      note,
+      categoryId,
+    });
+  };
+
+  const payInstallmentMutation = useMutation({
+    mutationFn: async (emi: Emi) => {
+      const currentInstallments =
+        installmentsByEmi[emi.id] ||
+        (
+          await apiClient.get<EmiInstallment[]>(`/emis/${emi.id}/installments`)
+        ).data;
+
+      const nextPendingInstallment = currentInstallments.find(
         (installment) => installment.status !== "PAID",
       );
 
@@ -148,16 +236,49 @@ export default function EMIs() {
         throw new Error("All installments for this EMI are already marked as paid.");
       }
 
-      await apiClient.post(`/emis/installments/${nextPendingInstallment.id}/pay`);
+      try {
+        await apiClient.post(`/emis/installments/${nextPendingInstallment.id}/pay`);
 
-      return nextPendingInstallment;
+        return {
+          emi,
+          installment: nextPendingInstallment,
+          recovered: false,
+        };
+      } catch (mutationError) {
+        const refreshedInstallments = (
+          await apiClient.get<EmiInstallment[]>(`/emis/${emi.id}/installments`)
+        ).data;
+        const updatedInstallment = refreshedInstallments.find(
+          (installment) => installment.id === nextPendingInstallment.id,
+        );
+
+        if (updatedInstallment?.status === "PAID") {
+          await ensureFallbackEmiTransaction(emi, updatedInstallment);
+
+          return {
+            emi,
+            installment: updatedInstallment,
+            recovered: true,
+            originalError: mutationError,
+          };
+        }
+
+        throw mutationError;
+      }
     },
-    onSuccess: (_, emiId) => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["emis"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["emi-installments", emiId] });
-      toast.success("Installment paid successfully.");
+      queryClient.invalidateQueries({ queryKey: ["emi-installments-all"] });
+
+      if (result.recovered) {
+        toast.success(
+          "Installment marked as paid. A fallback expense entry was recorded because the backend auto-entry failed.",
+        );
+      } else {
+        toast.success("Installment paid successfully.");
+      }
     },
     onError: (mutationError) => {
       toast.error(
@@ -193,7 +314,7 @@ export default function EMIs() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Active EMIs</h1>
           <p className="text-muted-foreground">
-            Monitor and manage the EMI plans exposed by the backend API.
+            Monitor, pay, and review the real installment history for each EMI.
           </p>
         </div>
 
@@ -374,16 +495,24 @@ export default function EMIs() {
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3">
           <AnimatePresence>
             {emis.map((emi, index) => {
+              const installments = installmentsByEmi[emi.id] || [];
+              const paidInstallments = installments.length
+                ? installments.filter((installment) => installment.status === "PAID").length
+                : emi.paidInstallments;
+              const totalInstallments = installments.length || emi.totalInstallments;
               const progress =
-                emi.totalInstallments > 0
-                  ? (emi.paidInstallments / emi.totalInstallments) * 100
+                totalInstallments > 0
+                  ? (paidInstallments / totalInstallments) * 100
                   : 0;
-              const installmentsLeft = emi.totalInstallments - emi.paidInstallments;
+              const nextPendingInstallment = installments.find(
+                (installment) => installment.status !== "PAID",
+              );
+              const installmentsLeft = totalInstallments - paidInstallments;
               const isEndingSoon = installmentsLeft <= 3;
-              const isPaidOff = installmentsLeft <= 0 || emi.status === "COMPLETED";
+              const isPaidOff = installmentsLeft <= 0;
               const isPayingThisCard =
                 payInstallmentMutation.isPending &&
-                payInstallmentMutation.variables === emi.id;
+                payInstallmentMutation.variables?.id === emi.id;
 
               return (
                 <motion.div
@@ -423,16 +552,18 @@ export default function EMIs() {
                             Paid Installments
                           </p>
                           <p className="text-2xl font-bold font-mono">
-                            {emi.paidInstallments}
+                            {paidInstallments}
                             <span className="text-sm font-normal text-muted-foreground ml-1">
-                              / {emi.totalInstallments}
+                              / {totalInstallments}
                             </span>
                           </p>
                         </div>
                         <div>
-                          <p className="text-sm text-muted-foreground mb-1">Due Day</p>
+                          <p className="text-sm text-muted-foreground mb-1">Next Due</p>
                           <p className="text-sm font-semibold mt-2">
-                            {isPaidOff ? "Completed" : `Day ${emi.dueDay}`}
+                            {nextPendingInstallment
+                              ? formatDisplayDate(nextPendingInstallment.dueDate)
+                              : "Completed"}
                           </p>
                         </div>
                       </div>
@@ -440,7 +571,11 @@ export default function EMIs() {
                       <div className="space-y-2">
                         <div className="flex justify-between text-xs text-muted-foreground">
                           <span>0%</span>
-                          <span>{Math.round(progress)}% Completed</span>
+                          <span>
+                            {isInstallmentsSnapshotLoading
+                              ? "Syncing installments..."
+                              : `${Math.round(progress)}% Completed`}
+                          </span>
                           <span>100%</span>
                         </div>
                         <Progress
@@ -464,7 +599,7 @@ export default function EMIs() {
                         variant="secondary"
                         className="w-full flex-1"
                         disabled={isPaidOff || isPayingThisCard}
-                        onClick={() => payInstallmentMutation.mutate(emi.id)}
+                        onClick={() => payInstallmentMutation.mutate(emi)}
                       >
                         {isPayingThisCard ? (
                           <>
@@ -505,49 +640,46 @@ export default function EMIs() {
           <DialogHeader>
             <DialogTitle>{selectedEmi?.loanName || "EMI Details"}</DialogTitle>
             <DialogDescription>
-              Installment schedule and payment status synced from the backend.
+              Real installment schedule and payment history from the backend.
             </DialogDescription>
           </DialogHeader>
 
-          {isInstallmentsLoading ? (
-            <div className="py-8 text-center text-muted-foreground animate-pulse">
-              Loading installments...
-            </div>
-          ) : installmentsError ? (
-            <div className="py-6 text-center text-sm text-muted-foreground">
-              {getApiErrorMessage(
-                installmentsError,
-                "Unable to load EMI installments.",
-              )}
-            </div>
-          ) : installments.length === 0 ? (
+          {selectedInstallments.length === 0 ? (
             <div className="py-6 text-center text-sm text-muted-foreground">
               No installments were returned for this EMI.
             </div>
           ) : (
             <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
-              {installments.map((installment) => (
-                <div
-                  key={installment.id}
-                  className="flex items-center justify-between rounded-xl border p-4 gap-4"
-                >
-                  <div>
-                    <p className="font-medium">
-                      Installment {installment.installmentNo}
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      Due {formatDisplayDate(installment.dueDate)}
-                    </p>
-                  </div>
+              {selectedInstallments
+                .slice()
+                .sort((left, right) => left.installmentNo - right.installmentNo)
+                .map((installment) => (
+                  <div
+                    key={installment.id}
+                    className="flex items-center justify-between rounded-xl border p-4 gap-4"
+                  >
+                    <div>
+                      <p className="font-medium">
+                        Installment {installment.installmentNo}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Due {formatDisplayDate(installment.dueDate)}
+                      </p>
+                      {installment.paidDate ? (
+                        <p className="text-sm text-emerald-500">
+                          Paid {formatDisplayDate(installment.paidDate)}
+                        </p>
+                      ) : null}
+                    </div>
 
-                  <div className="text-right">
-                    <p className="font-semibold">{formatCurrency(installment.amount)}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {installment.status}
-                    </p>
+                    <div className="text-right">
+                      <p className="font-semibold">{formatCurrency(installment.amount)}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {installment.status}
+                      </p>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           )}
         </DialogContent>
